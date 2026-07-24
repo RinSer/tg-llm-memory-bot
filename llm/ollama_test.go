@@ -2,6 +2,8 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,7 +61,7 @@ func TestLocalOllamaGenerateStreamEmitsChunks(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	o, err := newOllama("m", srv.URL)
+	o, err := newOllama("m", srv.URL, "")
 	if err != nil {
 		t.Fatalf("newOllama: %v", err)
 	}
@@ -84,6 +86,66 @@ func TestLocalOllamaGenerateStreamEmitsChunks(t *testing.T) {
 
 	if reply != "Hello, world!" {
 		t.Fatalf("expected the accumulated reply %q, got %q", "Hello, world!", reply)
+	}
+}
+
+func TestNewOllamaSendsConfiguredKeepAlive(t *testing.T) {
+	var gotKeepAlive string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			KeepAlive string `json:"keep_alive"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+		}
+		gotKeepAlive = req.KeepAlive
+		w.Write([]byte(`{"model":"m","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":"hi"},"done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	o, err := newOllama("m", srv.URL, "-1")
+	if err != nil {
+		t.Fatalf("newOllama: %v", err)
+	}
+
+	if _, err := o.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	if gotKeepAlive != "-1" {
+		t.Fatalf("expected keep_alive %q sent to server, got %q", "-1", gotKeepAlive)
+	}
+}
+
+func TestNewOllamaOmitsKeepAliveWhenUnset(t *testing.T) {
+	var gotKeepAlive string
+	sawField := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]any
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+		}
+		if v, ok := raw["keep_alive"]; ok {
+			sawField = true
+			gotKeepAlive = v.(string)
+		}
+		w.Write([]byte(`{"model":"m","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":"hi"},"done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	o, err := newOllama("m", srv.URL, "")
+	if err != nil {
+		t.Fatalf("newOllama: %v", err)
+	}
+
+	if _, err := o.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	if sawField {
+		t.Fatalf("expected no keep_alive field when unset, got %q", gotKeepAlive)
 	}
 }
 

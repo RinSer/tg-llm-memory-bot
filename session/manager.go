@@ -17,6 +17,7 @@ type Config struct {
 	DefaultModel    string
 	OpenAIAPIToken  string
 	OllamaBaseURL   string
+	OllamaKeepAlive string
 }
 
 type Manager struct {
@@ -38,10 +39,11 @@ func DefaultTitle() string {
 
 func (m *Manager) providerConfig(providerName llm.ProviderName, model string) llm.Config {
 	return llm.Config{
-		Name:     providerName,
-		Model:    model,
-		APIToken: m.cfg.OpenAIAPIToken,
-		BaseURL:  m.cfg.OllamaBaseURL,
+		Name:      providerName,
+		Model:     model,
+		APIToken:  m.cfg.OpenAIAPIToken,
+		BaseURL:   m.cfg.OllamaBaseURL,
+		KeepAlive: m.cfg.OllamaKeepAlive,
 	}
 }
 

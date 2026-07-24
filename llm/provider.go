@@ -67,10 +67,11 @@ func modelStrings[T ~string](models []T) []string {
 // Config configures a Provider. Fields not relevant to the chosen provider
 // are ignored.
 type Config struct {
-	Name     ProviderName
-	Model    string
-	APIToken string // required for openai
-	BaseURL  string // optional for ollama, defaults to http://localhost:11434
+	Name      ProviderName
+	Model     string
+	APIToken  string // required for openai
+	BaseURL   string // optional for ollama, defaults to http://localhost:11434
+	KeepAlive string // optional for ollama, e.g. "-1" to keep the model loaded indefinitely
 }
 
 func New(cfg Config) (Provider, error) {
@@ -78,7 +79,7 @@ func New(cfg Config) (Provider, error) {
 	case ProviderOpenAI:
 		return newOpenAI(cfg.Model, cfg.APIToken)
 	case ProviderOllama:
-		return newOllama(cfg.Model, cfg.BaseURL)
+		return newOllama(cfg.Model, cfg.BaseURL, cfg.KeepAlive)
 	default:
 		return nil, fmt.Errorf("unknown LLM provider: %v", cfg.Name)
 	}

@@ -16,10 +16,17 @@ Configure these either as real environment variables or by adding a `.env` file 
 | `TG_BOT_API_TOKEN` | yes | — | Telegram bot token from [@BotFather](https://t.me/BotFather). |
 | `OPENAI_API_TOKEN` | yes | — | OpenAI API key. Required at startup even if you only ever use Ollama, since a session can be switched to OpenAI via `/model` at any time. |
 | `OLLAMA_BASE_URL` | no | `http://localhost:11434` | Base URL of a running Ollama server. |
+| `OLLAMA_KEEP_ALIVE` | no | `-1` | Sent as Ollama's `keep_alive` on every request — how long the model stays loaded in memory/VRAM after a request. `-1` keeps it loaded indefinitely (no reload latency on the next message, at the cost of holding VRAM even when idle); Ollama's own default if you unset this is `5m`. |
 | `SESSION_HISTORY_LIMIT` | no | `20` | Max number of past messages sent as context per session (see "Session memory" above). |
 | `DB_PATH` | no | `bot.db` | Path to the SQLite database file. |
 
 Additionally, edit `allowedUserIDs` in [auth/auth.go](auth/auth.go) to add the Telegram user IDs allowed to use the bot — this is hardcoded rather than configured, since the bot is meant for a fixed, known set of users. Everyone else is silently ignored.
+
+### Flash attention (Ollama)
+
+Flash attention is a setting of the **Ollama server**, not something a client request can turn on — it's controlled by the `OLLAMA_FLASH_ATTENTION=1` environment variable, read only when `ollama serve` itself starts. This bot cannot set it for you: it talks to Ollama over HTTP rather than launching it, so there's no process relationship for an environment variable to flow through, and just setting it in the bot's own environment does nothing for an already (or separately) running Ollama server.
+
+To actually enable it: set `OLLAMA_FLASH_ATTENTION=1` persistently in your OS environment (e.g. `setx OLLAMA_FLASH_ATTENTION 1` on Windows, or export it in the shell profile that launches Ollama on macOS/Linux), then restart the Ollama server for it to take effect. If the bot detects this variable isn't `"1"` in its *own* environment at startup, it logs a warning as a hint — meaningful when the bot and Ollama share the same environment (the common local setup), but not a guarantee either way.
 
 ## Building
 

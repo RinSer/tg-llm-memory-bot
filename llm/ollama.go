@@ -53,14 +53,23 @@ func listOllamaModels(ctx context.Context, baseURL string) ([]string, error) {
 	return names, nil
 }
 
-func newOllama(model, baseURL string) (*localOllama, error) {
+func newOllama(model, baseURL, keepAlive string) (*localOllama, error) {
 	if baseURL == "" {
 		baseURL = defaultOllamaBaseURL
 	}
-	llm, err := ollama.New(
+	opts := []ollama.Option{
 		ollama.WithModel(model),
 		ollama.WithServerURL(baseURL),
-	)
+	}
+	if keepAlive != "" {
+		// e.g. "-1" keeps the model loaded in memory/VRAM indefinitely,
+		// avoiding a reload on every request. Flash attention is a
+		// separate, server-side-only setting (OLLAMA_FLASH_ATTENTION=1
+		// before starting `ollama serve`) -- there's no per-request or
+		// client-side equivalent to set it here.
+		opts = append(opts, ollama.WithKeepAlive(keepAlive))
+	}
+	llm, err := ollama.New(opts...)
 	return &localOllama{llm}, err
 }
 

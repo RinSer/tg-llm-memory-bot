@@ -39,11 +39,13 @@ var loadingFrames = []string{
 }
 
 const (
-	tgApiTokenVar     = "TG_BOT_API_TOKEN"
-	openaiApiTokenVar = "OPENAI_API_TOKEN"
-	ollamaBaseURLVar  = "OLLAMA_BASE_URL"
-	historyLimitVar   = "SESSION_HISTORY_LIMIT"
-	dbPathVar         = "DB_PATH"
+	tgApiTokenVar      = "TG_BOT_API_TOKEN"
+	openaiApiTokenVar  = "OPENAI_API_TOKEN"
+	ollamaBaseURLVar   = "OLLAMA_BASE_URL"
+	ollamaKeepAliveVar = "OLLAMA_KEEP_ALIVE"
+	ollamaFlashAttnVar = "OLLAMA_FLASH_ATTENTION"
+	historyLimitVar    = "SESSION_HISTORY_LIMIT"
+	dbPathVar          = "DB_PATH"
 
 	defaultHistoryLimit = 20
 	defaultDBPath       = "bot.db"
@@ -53,6 +55,11 @@ const (
 	// model) at any time.
 	defaultProvider = llm.ProviderOllama
 	defaultModel    = "gemma4:latest"
+
+	// "-1" keeps the model loaded in memory/VRAM indefinitely instead of
+	// Ollama's own default (unload after 5m idle), trading idle VRAM usage
+	// for no reload latency on the next message.
+	defaultOllamaKeepAlive = "-1"
 
 	ollamaDownloadURL = "https://ollama.com/download/windows"
 )
@@ -70,6 +77,7 @@ func main() {
 	}
 
 	checkOllamaInstalled()
+	checkFlashAttention()
 
 	tgApiToken := mustEnv(tgApiTokenVar)
 	openaiApiToken := mustEnv(openaiApiTokenVar)
@@ -88,6 +96,7 @@ func main() {
 		DefaultModel:    defaultModel,
 		OpenAIAPIToken:  openaiApiToken,
 		OllamaBaseURL:   os.Getenv(ollamaBaseURLVar),
+		OllamaKeepAlive: getEnv(ollamaKeepAliveVar, defaultOllamaKeepAlive),
 	})
 
 	allowList := auth.NewAllowList()
@@ -122,6 +131,20 @@ func main() {
 func checkOllamaInstalled() {
 	if _, err := exec.LookPath("ollama"); err != nil {
 		log.Printf("Warning: ollama does not appear to be installed. Install it from %s to use local models.", ollamaDownloadURL)
+	}
+}
+
+// checkFlashAttention warns if OLLAMA_FLASH_ATTENTION isn't set to "1" in
+// this process's own environment. It's only a hint: flash attention is a
+// setting of the Ollama *server* process, picked up from its environment
+// only at startup -- this bot has no way to set or verify it there. The
+// check is meaningful when the bot and `ollama serve` share the same
+// environment (the common local setup), and a no-op warning otherwise.
+func checkFlashAttention() {
+	if os.Getenv(ollamaFlashAttnVar) != "1" {
+		log.Printf("Warning: %s is not set to \"1\" in this process's environment. "+
+			"If you want faster Ollama inference, set it (persistently, at the OS level) and restart the Ollama server -- "+
+			"this bot cannot set it for you since it doesn't control the Ollama server process.", ollamaFlashAttnVar)
 	}
 }
 
@@ -194,34 +217,46 @@ func (s *streamBuffer) String() string {
 // streamCursor marks the tail of text still being generated.
 const streamCursor = " ▌"
 
-// streamEditInterval is how often the placeholder message is updated with
-// newly streamed text. Telegram throttles rapid edits to the same message,
-// so this deliberately batches chunks rather than editing on every token.
-const streamEditInterval = 1000 * time.Millisecond
+// streamEditInterval is how often the placeholder message is updated.
+// Telegram throttles rapid edits to the same message, so this deliberately
+// batches chunks rather than editing on every token.
+const streamEditInterval = 500 * time.Millisecond
+
+// streamRevealRunesPerTick caps how much of the model's buffered-so-far
+// text is revealed on each tick. Without this, a burst of chunks arriving
+// between ticks would get pasted in all at once, looking like a jolt --
+// capping it gives a steady, slower typewriter-style reveal instead. If the
+// model is producing text slower than this rate, the reveal just tracks
+// generation 1:1 with no artificial delay.
+const streamRevealRunesPerTick = 6
 
 // startStreamingIndicator edits messageID on a fixed interval: showing the
 // rotating loadingFrames until the model's first chunk arrives in buf, then
-// the accumulated text-so-far (with a trailing cursor) until stopped. This
-// gives visible progress during a (possibly slow) LLM generation instead of
-// the chat appearing unresponsive.
+// a gradually-revealed prefix of the accumulated text-so-far (with a
+// trailing cursor) until stopped. This gives visible, smooth progress
+// during a (possibly slow) LLM generation instead of the chat appearing
+// unresponsive -- or dumping large bursts of text at once.
 func startStreamingIndicator(ctx context.Context, b *bot.Bot, chatID int64, messageID int, buf *streamBuffer) func() {
 	loopCtx, cancel := context.WithCancel(ctx)
 	go func() {
 		ticker := time.NewTicker(streamEditInterval)
 		defer ticker.Stop()
 		frame := 0
+		revealed := 0
 		lastText := loadingFrames[0]
 		for {
 			select {
 			case <-loopCtx.Done():
 				return
 			case <-ticker.C:
-				text := buf.String()
-				if text == "" {
+				available := []rune(buf.String())
+				var text string
+				if len(available) == 0 {
 					frame = (frame + 1) % len(loadingFrames)
 					text = loadingFrames[frame]
 				} else {
-					text += streamCursor
+					revealed = min(revealed+streamRevealRunesPerTick, len(available))
+					text = string(available[:revealed]) + streamCursor
 				}
 				if text == lastText {
 					continue

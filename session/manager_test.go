@@ -3,10 +3,10 @@ package session
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,10 +19,22 @@ import (
 // test cares about.
 type chatRequest struct {
 	Model    string `json:"model"`
+	Stream   bool   `json:"stream"`
 	Messages []struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
+}
+
+// chatResponseLine mirrors one NDJSON line of Ollama's /api/chat response.
+type chatResponseLine struct {
+	Model     string `json:"model"`
+	CreatedAt string `json:"created_at"`
+	Message   struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"message"`
+	Done bool `json:"done"`
 }
 
 // fakeOllama stands in for a real Ollama server: it records every /api/chat
@@ -66,7 +78,31 @@ func (f *fakeOllama) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Unlock()
 
-		fmt.Fprintf(w, `{"model":%q,"created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":%q},"done":true}`+"\n", req.Model, reply)
+		writeLine := func(content string, done bool) {
+			line := chatResponseLine{Model: req.Model, CreatedAt: "2024-01-01T00:00:00Z", Done: done}
+			line.Message.Role = "assistant"
+			line.Message.Content = content
+			json.NewEncoder(w).Encode(line)
+		}
+
+		if !req.Stream {
+			writeLine(reply, true)
+			return
+		}
+
+		// Split the reply into several chunks so streaming tests can
+		// observe multiple onChunk invocations, same as a real server
+		// sending one NDJSON line per generated piece.
+		const chunkSize = 3
+		runes := []rune(reply)
+		if len(runes) == 0 {
+			writeLine("", true)
+			return
+		}
+		for i := 0; i < len(runes); i += chunkSize {
+			end := min(i+chunkSize, len(runes))
+			writeLine(string(runes[i:end]), end == len(runes))
+		}
 	case "/api/tags":
 		names := make([]map[string]string, len(f.tags))
 		for i, n := range f.tags {
@@ -141,6 +177,46 @@ func TestReplyCreatesDefaultSessionAndPersistsHistory(t *testing.T) {
 	}
 	if len(req.Messages) != 1 || req.Messages[0].Content != "hi" {
 		t.Fatalf("expected a single message [hi] on first turn, got %+v", req.Messages)
+	}
+}
+
+func TestReplyStreamEmitsChunksAndPersistsFullReply(t *testing.T) {
+	fake := newFakeOllama(t, "hello brave world")
+	mgr, db := newTestManager(t, fake.URL, 20)
+	const userID = int64(7)
+
+	var chunks []string
+	reply, err := mgr.ReplyStream(context.Background(), userID, "hi", func(chunk string) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("ReplyStream: %v", err)
+	}
+	if reply != "hello brave world" {
+		t.Fatalf("expected %q, got %q", "hello brave world", reply)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected the reply to arrive as multiple chunks, got %v", chunks)
+	}
+	if got := strings.Join(chunks, ""); got != reply {
+		t.Fatalf("expected chunks to concatenate to the full reply: got %q, want %q", got, reply)
+	}
+
+	req := fake.lastRequest(t)
+	if !req.Stream {
+		t.Fatal("expected the request to Ollama to ask for streaming")
+	}
+
+	sess, err := db.GetActiveSession(userID)
+	if err != nil {
+		t.Fatalf("GetActiveSession: %v", err)
+	}
+	history, err := db.GetHistory(sess.ID, 10)
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if len(history) != 2 || history[1].Role != "assistant" || history[1].Content != reply {
+		t.Fatalf("expected the full reply (not partial chunks) persisted, got %+v", history)
 	}
 }
 

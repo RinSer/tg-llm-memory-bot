@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RinSer/tg-llm-memory-bot/auth"
@@ -147,14 +148,15 @@ func defaultHandler(manager *session.Manager) bot.HandlerFunc {
 			log.Println(phErr)
 		}
 
-		var stopLoading func()
+		buf := &streamBuffer{}
+		var stopStreaming func()
 		if placeholder != nil {
-			stopLoading = startLoadingIndicator(ctx, b, chatID, placeholder.ID)
+			stopStreaming = startStreamingIndicator(ctx, b, chatID, placeholder.ID, buf)
 		}
 
-		reply, err := manager.Reply(ctx, update.Message.From.ID, text)
-		if stopLoading != nil {
-			stopLoading()
+		reply, err := manager.ReplyStream(ctx, update.Message.From.ID, text, buf.Append)
+		if stopStreaming != nil {
+			stopStreaming()
 		}
 		if err != nil {
 			log.Println(err)
@@ -169,26 +171,66 @@ func defaultHandler(manager *session.Manager) bot.HandlerFunc {
 	}
 }
 
-// startLoadingIndicator edits messageID on a fixed interval, cycling
-// through loadingFrames, until the returned stop func is called. It gives
-// visible feedback that the bot is working during a (possibly slow) LLM
-// generation instead of appearing unresponsive.
-func startLoadingIndicator(ctx context.Context, b *bot.Bot, chatID int64, messageID int) func() {
+// streamBuffer accumulates streamed chunks. Append runs on the goroutine
+// driving the LLM call; String is read concurrently by the ticker in
+// startStreamingIndicator, hence the mutex.
+type streamBuffer struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (s *streamBuffer) Append(chunk string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.text.WriteString(chunk)
+}
+
+func (s *streamBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.text.String()
+}
+
+// streamCursor marks the tail of text still being generated.
+const streamCursor = " ▌"
+
+// streamEditInterval is how often the placeholder message is updated with
+// newly streamed text. Telegram throttles rapid edits to the same message,
+// so this deliberately batches chunks rather than editing on every token.
+const streamEditInterval = 1000 * time.Millisecond
+
+// startStreamingIndicator edits messageID on a fixed interval: showing the
+// rotating loadingFrames until the model's first chunk arrives in buf, then
+// the accumulated text-so-far (with a trailing cursor) until stopped. This
+// gives visible progress during a (possibly slow) LLM generation instead of
+// the chat appearing unresponsive.
+func startStreamingIndicator(ctx context.Context, b *bot.Bot, chatID int64, messageID int, buf *streamBuffer) func() {
 	loopCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		ticker := time.NewTicker(1200 * time.Millisecond)
+		ticker := time.NewTicker(streamEditInterval)
 		defer ticker.Stop()
 		frame := 0
+		lastText := loadingFrames[0]
 		for {
 			select {
 			case <-loopCtx.Done():
 				return
 			case <-ticker.C:
-				frame = (frame + 1) % len(loadingFrames)
+				text := buf.String()
+				if text == "" {
+					frame = (frame + 1) % len(loadingFrames)
+					text = loadingFrames[frame]
+				} else {
+					text += streamCursor
+				}
+				if text == lastText {
+					continue
+				}
+				lastText = text
 				b.EditMessageText(loopCtx, &bot.EditMessageTextParams{
 					ChatID:    chatID,
 					MessageID: messageID,
-					Text:      loadingFrames[frame],
+					Text:      text,
 				})
 			}
 		}

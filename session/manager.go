@@ -56,6 +56,17 @@ func (m *Manager) activeSession(userID int64) (*store.Session, error) {
 // Reply appends the user's message and the model's reply to the user's
 // active session (creating one if none exists yet) and returns the reply.
 func (m *Manager) Reply(ctx context.Context, userID int64, text string) (string, error) {
+	return m.reply(ctx, userID, text, nil)
+}
+
+// ReplyStream is like Reply, but invokes onChunk with each piece of the
+// reply as the model produces it. The full reply is still persisted and
+// returned only once generation finishes.
+func (m *Manager) ReplyStream(ctx context.Context, userID int64, text string, onChunk func(chunk string)) (string, error) {
+	return m.reply(ctx, userID, text, onChunk)
+}
+
+func (m *Manager) reply(ctx context.Context, userID int64, text string, onChunk func(chunk string)) (string, error) {
 	sess, err := m.activeSession(userID)
 	if err != nil {
 		return "", err
@@ -81,7 +92,12 @@ func (m *Manager) Reply(ctx context.Context, userID int64, text string) (string,
 		return "", err
 	}
 
-	reply, err := provider.Generate(ctx, messages)
+	var reply string
+	if onChunk != nil {
+		reply, err = provider.GenerateStream(ctx, messages, onChunk)
+	} else {
+		reply, err = provider.Generate(ctx, messages)
+	}
 	if err != nil {
 		return "", err
 	}

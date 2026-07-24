@@ -85,3 +85,5 @@ Note: `go build ./...` (used for verifying the whole module compiles, e.g. in CI
 - `/model` — pick a provider then a model via inline buttons; applies to the active session only.
 
 Anything else is treated as a message to the active session's model. Text starting with `/` that doesn't match a command above is rejected rather than sent to the model.
+
+While a reply is generating, the bot posts a placeholder message that shows the streamed text-so-far (with a trailing cursor), updated roughly once a second, then replaces it with the final reply — so long generations don't look unresponsive. Edits are batched on a timer rather than sent per-token, since Telegram throttles rapid edits to the same message.

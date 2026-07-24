@@ -67,3 +67,7 @@ func newOllama(model, baseURL string) (*localOllama, error) {
 func (o *localOllama) Generate(ctx context.Context, messages []Message) (string, error) {
 	return generate(ctx, o.model, messages)
 }
+
+func (o *localOllama) GenerateStream(ctx context.Context, messages []Message, onChunk func(string)) (string, error) {
+	return generateStream(ctx, o.model, messages, onChunk)
+}

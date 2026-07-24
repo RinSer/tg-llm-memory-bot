@@ -44,6 +44,49 @@ func TestListOllamaModelsServerError(t *testing.T) {
 	}
 }
 
+func TestLocalOllamaGenerateStreamEmitsChunks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulates a real Ollama server streaming a reply as several
+		// NDJSON lines, each carrying the next incremental piece.
+		lines := []string{
+			`{"model":"m","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":"Hello"},"done":false}`,
+			`{"model":"m","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":", "},"done":false}`,
+			`{"model":"m","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":"world!"},"done":true}`,
+		}
+		for _, l := range lines {
+			w.Write([]byte(l + "\n"))
+		}
+	}))
+	defer srv.Close()
+
+	o, err := newOllama("m", srv.URL)
+	if err != nil {
+		t.Fatalf("newOllama: %v", err)
+	}
+
+	var chunks []string
+	reply, err := o.GenerateStream(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, func(chunk string) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("GenerateStream: %v", err)
+	}
+
+	want := []string{"Hello", ", ", "world!"}
+	if len(chunks) != len(want) {
+		t.Fatalf("expected chunks %v, got %v", want, chunks)
+	}
+	for i := range want {
+		if chunks[i] != want[i] {
+			t.Fatalf("expected chunks %v, got %v", want, chunks)
+		}
+	}
+
+	if reply != "Hello, world!" {
+		t.Fatalf("expected the accumulated reply %q, got %q", "Hello, world!", reply)
+	}
+}
+
 func TestModelsForOllamaDelegatesToServer(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"models":[{"name":"mistral:latest"}]}`))

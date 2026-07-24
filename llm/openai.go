@@ -51,3 +51,7 @@ func newOpenAI(model, apiToken string) (*opanai, error) {
 func (o *opanai) Generate(ctx context.Context, messages []Message) (string, error) {
 	return generate(ctx, o.model, messages)
 }
+
+func (o *opanai) GenerateStream(ctx context.Context, messages []Message, onChunk func(string)) (string, error) {
+	return generateStream(ctx, o.model, messages, onChunk)
+}

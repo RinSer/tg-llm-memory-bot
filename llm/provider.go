@@ -24,6 +24,11 @@ type Message struct {
 // Provider generates a reply given the full message history.
 type Provider interface {
 	Generate(ctx context.Context, messages []Message) (string, error)
+
+	// GenerateStream is like Generate, but invokes onChunk with each piece
+	// of text as the model produces it, in addition to returning the full
+	// reply once generation finishes.
+	GenerateStream(ctx context.Context, messages []Message, onChunk func(chunk string)) (string, error)
 }
 
 // ProviderName identifies a supported LLM backend.

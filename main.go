@@ -11,8 +11,10 @@ import (
 	"github.com/joho/godotenv"
 )
 
-const openaiApiTokenVar = "OPENAI_API_TOKEN"
-const tgApiTokenVar = "TG_BOT_API_TOKEN"
+const (
+	openaiApiTokenVar = "OPENAI_API_TOKEN"
+	tgApiTokenVar     = "TG_BOT_API_TOKEN"
+)
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -39,13 +41,13 @@ func main() {
 		)
 	}
 
-	llm, err := llm.New(openaiApiToken)
+	llm, err := llm.New("openai", "gpt-4.1-mini", openaiApiToken)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	opts := []bot.Option{
-		bot.WithDefaultHandler(llm.Handler),
+		bot.WithDefaultHandler(llm.Talk),
 	}
 
 	b, err := bot.New(tgApiToken, opts...)

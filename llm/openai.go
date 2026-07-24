@@ -10,19 +10,19 @@ import (
 	"github.com/tmc/langchaingo/llms/openai"
 )
 
-type LLM struct {
+type opanai struct {
 	model *openai.LLM
 }
 
-func New(apiToken string) (*LLM, error) {
+func newOpenAI(model, apiToken string) (*opanai, error) {
 	llm, err := openai.New(
-		openai.WithModel("gpt-4.1-mini"),
+		openai.WithModel(model),
 		openai.WithToken(apiToken),
 	)
-	return &LLM{llm}, err
+	return &opanai{llm}, err
 }
 
-func (llm *LLM) Handler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (llm *opanai) Talk(ctx context.Context, b *bot.Bot, update *models.Update) {
 	prompt := update.Message.Text
 	completion, err := llms.GenerateFromSinglePrompt(ctx, llm.model, prompt)
 	if err != nil {

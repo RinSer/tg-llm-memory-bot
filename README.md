@@ -80,9 +80,8 @@ Note: `go build ./...` (used for verifying the whole module compiles, e.g. in CI
 
 ## Bot commands
 
-- `/new [title]` — start a new session (becomes the active one).
-- `/sessions` — list your sessions, `*` marks the active one.
-- `/switch <id>` — switch the active session.
+- `/new [title]` — start a new session (becomes the active one). Without a title, it's named with the current timestamp.
+- `/sessions` — list your sessions as buttons (`*` marks the active one); tap one to switch to it.
 - `/model` — pick a provider then a model via inline buttons; applies to the active session only.
 
-Anything else is treated as a message to the active session's model.
+Anything else is treated as a message to the active session's model. Text starting with `/` that doesn't match a command above is rejected rather than sent to the model.

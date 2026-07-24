@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/RinSer/tg-llm-memory-bot/llm"
 	"github.com/RinSer/tg-llm-memory-bot/store"
@@ -223,6 +224,19 @@ func TestSetModelUpdatesSessionWithoutClearingHistory(t *testing.T) {
 	req := fake.lastRequest(t)
 	if req.Model != "new-model" {
 		t.Fatalf("expected subsequent reply to use new-model, got %s", req.Model)
+	}
+}
+
+func TestNewSessionEmptyTitleUsesTimestamp(t *testing.T) {
+	fake := newFakeOllama(t)
+	mgr, _ := newTestManager(t, fake.URL, 20)
+
+	sess, err := mgr.NewSession(1, "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if _, err := time.Parse(titleTimeFormat, sess.Title); err != nil {
+		t.Fatalf("expected title %q to be a timestamp in %q: %v", sess.Title, titleTimeFormat, err)
 	}
 }
 

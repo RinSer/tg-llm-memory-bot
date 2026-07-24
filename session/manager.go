@@ -28,6 +28,14 @@ func NewManager(s *store.Store, cfg Config) *Manager {
 	return &Manager{store: s, cfg: cfg}
 }
 
+const titleTimeFormat = "2006-01-02 15:04:05"
+
+// DefaultTitle returns a timestamp-based session title, used whenever a
+// session is created without an explicit one.
+func DefaultTitle() string {
+	return time.Now().Format(titleTimeFormat)
+}
+
 func (m *Manager) providerConfig(providerName llm.ProviderName, model string) llm.Config {
 	return llm.Config{
 		Name:     providerName,
@@ -40,7 +48,7 @@ func (m *Manager) providerConfig(providerName llm.ProviderName, model string) ll
 func (m *Manager) activeSession(userID int64) (*store.Session, error) {
 	sess, err := m.store.GetActiveSession(userID)
 	if errors.Is(err, store.ErrNoActiveSession) {
-		return m.store.CreateSession(userID, time.Now().Format(time.RFC3339), string(m.cfg.DefaultProvider), m.cfg.DefaultModel)
+		return m.store.CreateSession(userID, DefaultTitle(), string(m.cfg.DefaultProvider), m.cfg.DefaultModel)
 	}
 	return sess, err
 }
@@ -85,7 +93,12 @@ func (m *Manager) Reply(ctx context.Context, userID int64, text string) (string,
 	return reply, nil
 }
 
+// NewSession creates a session with the given title, or a timestamp-based
+// one if title is empty.
 func (m *Manager) NewSession(userID int64, title string) (*store.Session, error) {
+	if title == "" {
+		title = DefaultTitle()
+	}
 	return m.store.CreateSession(userID, title, string(m.cfg.DefaultProvider), m.cfg.DefaultModel)
 }
 

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/RinSer/tg-llm-memory-bot/auth"
 	"github.com/RinSer/tg-llm-memory-bot/llm"
@@ -18,6 +19,23 @@ import (
 	"github.com/go-telegram/bot/models"
 	"github.com/joho/godotenv"
 )
+
+// botCommands is registered with Telegram via SetMyCommands so clients show
+// them, with descriptions, in the bot's native commands menu.
+var botCommands = []models.BotCommand{
+	{Command: "new", Description: "Start a new session"},
+	{Command: "sessions", Description: "List your sessions and pick one to switch to"},
+	{Command: "model", Description: "Choose a provider and model for the active session"},
+}
+
+// loadingFrames cycle in the placeholder message shown while a reply is
+// being generated.
+var loadingFrames = []string{
+	"\U0001F914 Thinking",
+	"\U0001F914 Thinking.",
+	"\U0001F914 Thinking..",
+	"\U0001F914 Thinking...",
+}
 
 const (
 	tgApiTokenVar     = "TG_BOT_API_TOKEN"
@@ -83,12 +101,16 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: botCommands}); err != nil {
+		log.Printf("Warning: failed to register bot commands menu: %v", err)
+	}
+
 	b.RegisterHandler(bot.HandlerTypeMessageText, "new", bot.MatchTypeCommand, newSessionHandler(manager))
 	b.RegisterHandler(bot.HandlerTypeMessageText, "sessions", bot.MatchTypeCommand, listSessionsHandler(manager))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "switch", bot.MatchTypeCommand, switchSessionHandler(manager))
 	b.RegisterHandler(bot.HandlerTypeMessageText, "model", bot.MatchTypeCommand, modelPickerHandler())
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "provider:", bot.MatchTypePrefix, providerChosenHandler(manager))
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "model:", bot.MatchTypePrefix, modelChosenHandler(manager))
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "switch:", bot.MatchTypePrefix, switchSessionChosenHandler(manager))
 
 	log.Printf("Bot is listening for requests (db: %s, session history limit: %d messages). Press Ctrl+C to stop.", dbPath, historyLimit)
 	b.Start(ctx)
@@ -104,21 +126,79 @@ func checkOllamaInstalled() {
 
 func defaultHandler(manager *session.Manager) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		reply, err := manager.Reply(ctx, update.Message.From.ID, update.Message.Text)
+		// Guards against stray updates (e.g. a callback query that matched
+		// no registered handler) that carry no Message to read from.
+		if update.Message == nil {
+			return
+		}
+
+		text := update.Message.Text
+		// Anything that looks like a command -- known, mistyped, or sent
+		// with a "@BotName" suffix the router's entity matcher doesn't
+		// strip -- should never be forwarded to the model as chat input.
+		if strings.HasPrefix(text, "/") {
+			send(ctx, b, update, "Unknown command. Tap the menu button next to the message box to see available commands.")
+			return
+		}
+
+		chatID := update.Message.Chat.ID
+		placeholder, phErr := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: loadingFrames[0]})
+		if phErr != nil {
+			log.Println(phErr)
+		}
+
+		var stopLoading func()
+		if placeholder != nil {
+			stopLoading = startLoadingIndicator(ctx, b, chatID, placeholder.ID)
+		}
+
+		reply, err := manager.Reply(ctx, update.Message.From.ID, text)
+		if stopLoading != nil {
+			stopLoading()
+		}
 		if err != nil {
 			log.Println(err)
 			reply = fmt.Sprintf("Error: %v", err)
+		}
+
+		if placeholder != nil {
+			b.EditMessageText(ctx, &bot.EditMessageTextParams{ChatID: chatID, MessageID: placeholder.ID, Text: reply})
+			return
 		}
 		send(ctx, b, update, reply)
 	}
 }
 
+// startLoadingIndicator edits messageID on a fixed interval, cycling
+// through loadingFrames, until the returned stop func is called. It gives
+// visible feedback that the bot is working during a (possibly slow) LLM
+// generation instead of appearing unresponsive.
+func startLoadingIndicator(ctx context.Context, b *bot.Bot, chatID int64, messageID int) func() {
+	loopCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(1200 * time.Millisecond)
+		defer ticker.Stop()
+		frame := 0
+		for {
+			select {
+			case <-loopCtx.Done():
+				return
+			case <-ticker.C:
+				frame = (frame + 1) % len(loadingFrames)
+				b.EditMessageText(loopCtx, &bot.EditMessageTextParams{
+					ChatID:    chatID,
+					MessageID: messageID,
+					Text:      loadingFrames[frame],
+				})
+			}
+		}
+	}()
+	return cancel
+}
+
 func newSessionHandler(manager *session.Manager) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		title := strings.TrimSpace(commandArgs(update.Message.Text))
-		if title == "" {
-			title = "New session"
-		}
 		sess, err := manager.NewSession(update.Message.From.ID, title)
 		if err != nil {
 			log.Println(err)
@@ -129,6 +209,8 @@ func newSessionHandler(manager *session.Manager) bot.HandlerFunc {
 	}
 }
 
+// listSessionsHandler shows the user's sessions as inline-keyboard buttons;
+// tapping one switches to it via switchSessionChosenHandler.
 func listSessionsHandler(manager *session.Manager) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		sessions, err := manager.ListSessions(update.Message.From.ID)
@@ -138,35 +220,47 @@ func listSessionsHandler(manager *session.Manager) bot.HandlerFunc {
 			return
 		}
 		if len(sessions) == 0 {
-			send(ctx, b, update, "No sessions yet.")
+			send(ctx, b, update, "No sessions yet. Use /new to start one.")
 			return
 		}
-		var sb strings.Builder
+
+		rows := make([][]models.InlineKeyboardButton, 0, len(sessions))
 		for _, s := range sessions {
 			marker := " "
 			if s.IsActive {
 				marker = "*"
 			}
-			fmt.Fprintf(&sb, "%s #%d %s (%s/%s)\n", marker, s.ID, s.Title, s.Provider, s.Model)
+			label := fmt.Sprintf("%s #%d %s (%s/%s)", marker, s.ID, s.Title, s.Provider, s.Model)
+			rows = append(rows, []models.InlineKeyboardButton{
+				{Text: label, CallbackData: fmt.Sprintf("switch:%d", s.ID)},
+			})
 		}
-		send(ctx, b, update, sb.String())
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      update.Message.Chat.ID,
+			Text:        "Choose a session:",
+			ReplyMarkup: models.InlineKeyboardMarkup{InlineKeyboard: rows},
+		})
 	}
 }
 
-func switchSessionHandler(manager *session.Manager) bot.HandlerFunc {
+// switchSessionChosenHandler finishes the /sessions flow: switch to the
+// tapped session.
+func switchSessionChosenHandler(manager *session.Manager) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		arg := strings.TrimSpace(commandArgs(update.Message.Text))
-		sessionID, err := strconv.ParseInt(arg, 10, 64)
+		cq := update.CallbackQuery
+		answer(ctx, b, cq)
+
+		sessionID, err := strconv.ParseInt(strings.TrimPrefix(cq.Data, "switch:"), 10, 64)
 		if err != nil {
-			send(ctx, b, update, "Usage: /switch <session id>")
+			editMessage(ctx, b, cq, "Invalid selection.", nil)
 			return
 		}
-		if err := manager.SwitchSession(update.Message.From.ID, sessionID); err != nil {
+		if err := manager.SwitchSession(cq.From.ID, sessionID); err != nil {
 			log.Println(err)
-			send(ctx, b, update, fmt.Sprintf("Error: %v", err))
+			editMessage(ctx, b, cq, fmt.Sprintf("Error: %v", err), nil)
 			return
 		}
-		send(ctx, b, update, fmt.Sprintf("Switched to session #%d", sessionID))
+		editMessage(ctx, b, cq, fmt.Sprintf("Switched to session #%d", sessionID), nil)
 	}
 }
 

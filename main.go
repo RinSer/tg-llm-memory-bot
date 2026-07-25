@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"log"
 	"os"
@@ -32,6 +33,14 @@ var botCommands = []models.BotCommand{
 	{Command: "save", Description: "Save recent messages to global (long-term) memory now"},
 	{Command: "compact", Description: "Consolidate global memory when it grows large"},
 }
+
+// banner greets on startup. Our mascot, MElephant (memory + elephant),
+// lives in banner.txt -- kept in a file and embedded rather than a string
+// literal because the art contains both backticks and backslashes, which a
+// Go raw-string literal can't hold.
+//
+//go:embed banner.txt
+var banner string
 
 // loadingFrames cycle in the placeholder message shown while a reply is
 // being generated.
@@ -91,6 +100,8 @@ const (
 )
 
 func main() {
+	fmt.Print(banner)
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 

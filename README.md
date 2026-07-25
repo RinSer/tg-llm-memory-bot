@@ -22,12 +22,6 @@ Configure these either as real environment variables or by adding a `.env` file 
 
 Additionally, edit `allowedUserIDs` in [auth/auth.go](auth/auth.go) to add the Telegram user IDs allowed to use the bot — this is hardcoded rather than configured, since the bot is meant for a fixed, known set of users. Everyone else is silently ignored.
 
-### Flash attention (Ollama)
-
-Flash attention is a setting of the **Ollama server**, not something a client request can turn on — it's controlled by the `OLLAMA_FLASH_ATTENTION=1` environment variable, read only when `ollama serve` itself starts. This bot cannot set it for you: it talks to Ollama over HTTP rather than launching it, so there's no process relationship for an environment variable to flow through, and just setting it in the bot's own environment does nothing for an already (or separately) running Ollama server.
-
-To actually enable it: set `OLLAMA_FLASH_ATTENTION=1` persistently in your OS environment (e.g. `setx OLLAMA_FLASH_ATTENTION 1` on Windows, or export it in the shell profile that launches Ollama on macOS/Linux), then restart the Ollama server for it to take effect. If the bot detects this variable isn't `"1"` in its *own* environment at startup, it logs a warning as a hint — meaningful when the bot and Ollama share the same environment (the common local setup), but not a guarantee either way.
-
 ## Building
 
 The SQLite driver (`modernc.org/sqlite`) is pure Go, so cross-compiling needs no C toolchain — just set `GOOS`/`GOARCH`.

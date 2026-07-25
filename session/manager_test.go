@@ -316,6 +316,45 @@ func TestNewSessionEmptyTitleUsesTimestamp(t *testing.T) {
 	}
 }
 
+func TestNewSessionInheritsPreviousModel(t *testing.T) {
+	fake := newFakeOllama(t, "hi")
+	mgr, db := newTestManager(t, fake.URL, 20)
+	const userID = int64(1)
+
+	// Establish an active session, then switch its model away from the default.
+	if _, err := mgr.Reply(context.Background(), userID, "hello"); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if err := mgr.SetModel(userID, llm.ProviderOllama, "chosen-model"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+
+	// A new session must inherit the chosen model, not silently revert to
+	// the configured default ("test-model").
+	sess, err := mgr.NewSession(userID, "next")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if sess.Provider != string(llm.ProviderOllama) || sess.Model != "chosen-model" {
+		t.Fatalf("expected new session to inherit ollama/chosen-model, got %s/%s", sess.Provider, sess.Model)
+	}
+	_ = db
+}
+
+func TestNewSessionFirstUseUsesDefault(t *testing.T) {
+	fake := newFakeOllama(t)
+	mgr, _ := newTestManager(t, fake.URL, 20)
+
+	// No prior session: falls back to the configured default model.
+	sess, err := mgr.NewSession(1, "first")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if sess.Model != "test-model" {
+		t.Fatalf("expected first session to use the default model, got %s", sess.Model)
+	}
+}
+
 func TestNewSessionAndSwitchSession(t *testing.T) {
 	fake := newFakeOllama(t)
 	mgr, db := newTestManager(t, fake.URL, 20)

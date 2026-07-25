@@ -162,8 +162,19 @@ func (m *Manager) NewSession(userID int64, title string) (*store.Session, error)
 	if title == "" {
 		title = DefaultTitle()
 	}
-	m.signalDeactivated(userID)
-	return m.store.CreateSession(userID, title, string(m.cfg.DefaultProvider), m.cfg.DefaultModel)
+
+	// Inherit the provider/model of the session being left, so a new
+	// session doesn't silently revert to the defaults after the user
+	// deliberately switched models. Falls back to the configured defaults
+	// only on true first use (no prior session).
+	provider, model := string(m.cfg.DefaultProvider), m.cfg.DefaultModel
+	if prev, err := m.store.GetActiveSession(userID); err == nil {
+		provider, model = prev.Provider, prev.Model
+		if m.cfg.GlobalMemory != nil {
+			m.cfg.GlobalMemory.Signal(userID, prev.ID, memory.SignalSessionSwitch)
+		}
+	}
+	return m.store.CreateSession(userID, title, provider, model)
 }
 
 func (m *Manager) ListSessions(userID int64) ([]store.Session, error) {

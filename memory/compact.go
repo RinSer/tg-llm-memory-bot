@@ -68,5 +68,9 @@ func (m *Manager) runCompaction(ctx context.Context, userID int64) error {
 		storeFacts[i] = store.Fact{Content: facts[i], Embedding: vecs[i]}
 	}
 
-	return m.cfg.Store.ReplaceGlobalMemory(userID, storeFacts)
+	if err := m.cfg.Store.ReplaceGlobalMemory(userID, storeFacts); err != nil {
+		return err
+	}
+	m.logf("compacted global memory for user %d: %d row(s) -> %d row(s)", userID, len(rows), len(facts))
+	return nil
 }

@@ -79,6 +79,8 @@ func (m *Manager) summarizeSession(ctx context.Context, userID int64, sess store
 		return
 	}
 
+	m.logf("saved %d fact(s) to global memory for user %d (session %d), %d row(s) total",
+		len(facts), userID, sess.ID, before+len(facts))
 	m.maybeWarnNearFull(userID, before, before+len(facts))
 }
 

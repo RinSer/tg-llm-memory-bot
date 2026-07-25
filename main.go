@@ -56,10 +56,14 @@ const (
 	defaultProvider = llm.ProviderOllama
 	defaultModel    = "gemma4:latest"
 
-	// "-1" keeps the model loaded in memory/VRAM indefinitely instead of
-	// Ollama's own default (unload after 5m idle), trading idle VRAM usage
-	// for no reload latency on the next message.
-	defaultOllamaKeepAlive = "-1"
+	// A negative duration keeps the model loaded in memory/VRAM
+	// indefinitely instead of Ollama's own default (unload after 5m
+	// idle), trading idle VRAM usage for no reload latency on the next
+	// message. It must have a unit suffix: langchaingo's KeepAlive field
+	// is a plain string, always sent as a quoted JSON string, and Ollama
+	// parses that via Go's time.ParseDuration -- a bare "-1" fails with
+	// "missing unit in duration", unlike a raw JSON number -1.
+	defaultOllamaKeepAlive = "-1s"
 
 	ollamaDownloadURL = "https://ollama.com/download/windows"
 )

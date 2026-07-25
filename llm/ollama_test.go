@@ -104,7 +104,7 @@ func TestNewOllamaSendsConfiguredKeepAlive(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	o, err := newOllama("m", srv.URL, "-1")
+	o, err := newOllama("m", srv.URL, "-1s")
 	if err != nil {
 		t.Fatalf("newOllama: %v", err)
 	}
@@ -113,8 +113,8 @@ func TestNewOllamaSendsConfiguredKeepAlive(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if gotKeepAlive != "-1" {
-		t.Fatalf("expected keep_alive %q sent to server, got %q", "-1", gotKeepAlive)
+	if gotKeepAlive != "-1s" {
+		t.Fatalf("expected keep_alive %q sent to server, got %q", "-1s", gotKeepAlive)
 	}
 }
 

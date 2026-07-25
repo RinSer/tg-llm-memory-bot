@@ -16,7 +16,7 @@ Configure these either as real environment variables or by adding a `.env` file 
 | `TG_BOT_API_TOKEN` | yes | — | Telegram bot token from [@BotFather](https://t.me/BotFather). |
 | `OPENAI_API_TOKEN` | yes | — | OpenAI API key. Required at startup even if you only ever use Ollama, since a session can be switched to OpenAI via `/model` at any time. |
 | `OLLAMA_BASE_URL` | no | `http://localhost:11434` | Base URL of a running Ollama server. |
-| `OLLAMA_KEEP_ALIVE` | no | `-1` | Sent as Ollama's `keep_alive` on every request — how long the model stays loaded in memory/VRAM after a request. `-1` keeps it loaded indefinitely (no reload latency on the next message, at the cost of holding VRAM even when idle); Ollama's own default if you unset this is `5m`. |
+| `OLLAMA_KEEP_ALIVE` | no | `-1s` | Sent as Ollama's `keep_alive` on every request — how long the model stays loaded in memory/VRAM after a request. Must be a Go duration string with a unit (e.g. `5m`, `1h`) — a bare `-1` fails with "missing unit in duration" (Ollama parses it via Go's `time.ParseDuration`; only a raw JSON number, which this client can't send, accepts a unitless value). A negative duration like `-1s` keeps it loaded indefinitely (no reload latency on the next message, at the cost of holding VRAM even when idle); Ollama's own default if you unset this is `5m`. |
 | `SESSION_HISTORY_LIMIT` | no | `20` | Max number of past messages sent as context per session (see "Session memory" above). |
 | `DB_PATH` | no | `bot.db` | Path to the SQLite database file. |
 

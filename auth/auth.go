@@ -30,6 +30,14 @@ func (a AllowList) IsAllowed(userID int64) bool {
 	return ok
 }
 
+// AllowedUserIDs returns the hardcoded allow-list as a slice (e.g. to start
+// a per-user background worker for each).
+func AllowedUserIDs() []int64 {
+	ids := make([]int64, len(allowedUserIDs))
+	copy(ids, allowedUserIDs)
+	return ids
+}
+
 // Middleware drops updates from users not present in the allow list before
 // they reach the wrapped handler. Applies to both plain messages and
 // callback queries (inline keyboard taps).

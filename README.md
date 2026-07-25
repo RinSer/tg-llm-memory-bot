@@ -5,7 +5,7 @@ A locally-run Telegram bot server for talking to LLMs, with persistent conversat
 Each authorized user can run multiple named **sessions**, each with its own message history and its own LLM provider/model. A session's provider and model can be switched at any time without losing its history, since history is stored as plain text, not tied to any provider SDK type. Memory is split into two tiers, keyed only by Telegram user ID:
 
 - **Session memory**: a per-session, windowed message history stored in SQLite (last N messages; N is configurable). Summarizing what falls out of the window instead of dropping it is a planned follow-up, not yet implemented.
-- **Global memory**: a cross-session `global_memory` table, scaffolded but not yet populated or queried. The intended design is a RAG-style lookup — content embedded and stored as a `BLOB` in the same SQLite file, retrieved via a brute-force cosine-similarity scan (no separate vector database needed at this scale).
+- **Global memory**: a cross-session, long-term memory shared across all of a user's sessions. A background worker per user summarizes conversation into concise **facts**, embeds each with a dedicated embedding model, and stores it as a vector in the `global_memory` SQLite table. On each chat turn, the user's message is embedded and the most similar facts (above a similarity threshold) are injected as a system message — so the model gets relevant long-term context without resending whole transcripts. See "Global memory" below for how it's triggered, configured, and compacted.
 
 ## Environment variables
 
@@ -19,6 +19,12 @@ Configure these either as real environment variables or by adding a `.env` file 
 | `OLLAMA_KEEP_ALIVE` | no | `-1s` | Sent as Ollama's `keep_alive` on every request — how long the model stays loaded in memory/VRAM after a request. Must be a Go duration string with a unit (e.g. `5m`, `1h`) — a bare `-1` fails with "missing unit in duration" (Ollama parses it via Go's `time.ParseDuration`; only a raw JSON number, which this client can't send, accepts a unitless value). A negative duration like `-1s` keeps it loaded indefinitely (no reload latency on the next message, at the cost of holding VRAM even when idle); Ollama's own default if you unset this is `5m`. |
 | `SESSION_HISTORY_LIMIT` | no | `20` | Max number of past messages sent as context per session (see "Session memory" above). |
 | `DB_PATH` | no | `bot.db` | Path to the SQLite database file. |
+| `EMBEDDING_PROVIDER` | no | `ollama` | Provider for the embedding model (`ollama` or `openai`). |
+| `EMBEDDING_MODEL` | no | `embeddinggemma` | Embedding model used for global memory. **Fixed per database** — see "Global memory" below. |
+| `GLOBAL_MEMORY_MESSAGE_THRESHOLD` | no | `20` | Summarize a session into global memory once this many new (un-summarized) messages accumulate. |
+| `GLOBAL_MEMORY_MIN_SIMILARITY` | no | `0.4` | Cosine-similarity floor a fact must clear to be injected into a chat. The real relevance filter; token cost scales with how many facts actually match. Model-dependent — tune by watching real retrievals against your embedding model. |
+| `GLOBAL_MEMORY_TOP_K` | no | `25` | Safety ceiling on facts injected per turn (only bounds the rare case where many clear the threshold at once). |
+| `GLOBAL_MEMORY_MAX_ROWS` | no | `10000` | Hard cap on a user's stored facts; the `/compact` target is half this. Reaching it pauses (never drops) new summarization until `/compact` runs. |
 
 Additionally, edit `allowedUserIDs` in [auth/auth.go](auth/auth.go) to add the Telegram user IDs allowed to use the bot — this is hardcoded rather than configured, since the bot is meant for a fixed, known set of users. Everyone else is silently ignored.
 
@@ -84,7 +90,18 @@ Note: `go build ./...` (used for verifying the whole module compiles, e.g. in CI
 - `/new [title]` — start a new session (becomes the active one). Without a title, it's named with the current timestamp.
 - `/sessions` — list your sessions as buttons (`*` marks the active one); tap one to switch to it.
 - `/model` — pick a provider then a model via inline buttons; applies to the active session only.
+- `/summarymodel` — pick the LLM used to summarize conversation into global memory (per user, shared across sessions).
+- `/save` — summarize the active session's recent messages into global memory right now, without waiting for the message threshold.
+- `/compact` — consolidate global memory when it has grown large (see below). Warns and asks for confirmation first.
 
 Anything else is treated as a message to the active session's model. Text starting with `/` that doesn't match a command above is rejected rather than sent to the model.
 
 While a reply is generating, the bot posts a placeholder message that shows the streamed text-so-far (with a trailing cursor), updated roughly once a second, then replaces it with the final reply — so long generations don't look unresponsive. Edits are batched on a timer rather than sent per-token, since Telegram throttles rapid edits to the same message.
+
+## Global memory
+
+Global memory is populated asynchronously by one background worker per allowed user. A worker summarizes a session's un-summarized messages into facts, embeds them, and stores them — triggered when a session accumulates `GLOBAL_MEMORY_MESSAGE_THRESHOLD` new messages, when you switch away from a session (its unsaved tail is flushed), or when you run `/save`. Progress is checkpointed per session in SQLite, so a crash or a transient LLM/embedding error never loses messages: the failed range is simply retried (against however many messages exist by then) on the next attempt.
+
+**Embedding model is fixed per database.** Cosine similarity is only meaningful when every stored vector came from the same embedding model, so the DB records which `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL` it was built with. If you start the bot with a different embedding model than the DB was built with, startup fails with a fatal error — revert the env vars, or point `DB_PATH` at a fresh database for the new model. If the embedding endpoint is simply unreachable at startup, global memory is disabled for that run (a warning, not fatal) and normal chatting continues.
+
+**Compaction.** Facts accumulate additively, so over time duplicates and stale/contradictory facts build up. `/compact` consolidates all of a user's facts down to about `GLOBAL_MEMORY_MAX_ROWS / 2` in one LLM pass. It's manual and never automatic: it can be slow and it blocks that user's chatting until it finishes, so it warns and asks for confirmation first. Reaching `GLOBAL_MEMORY_MAX_ROWS` pauses (never drops) new summarization until you compact, and you're sent a heads-up notification when memory crosses 90% of the cap.

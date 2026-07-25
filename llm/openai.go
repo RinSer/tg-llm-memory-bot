@@ -55,3 +55,7 @@ func (o *opanai) Generate(ctx context.Context, messages []Message) (string, erro
 func (o *opanai) GenerateStream(ctx context.Context, messages []Message, onChunk func(string)) (string, error) {
 	return generateStream(ctx, o.model, messages, onChunk)
 }
+
+func (o *opanai) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	return o.model.CreateEmbedding(ctx, texts)
+}

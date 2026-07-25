@@ -14,6 +14,7 @@ import (
 
 	"github.com/RinSer/tg-llm-memory-bot/auth"
 	"github.com/RinSer/tg-llm-memory-bot/llm"
+	"github.com/RinSer/tg-llm-memory-bot/memory"
 	"github.com/RinSer/tg-llm-memory-bot/session"
 	"github.com/RinSer/tg-llm-memory-bot/store"
 	"github.com/go-telegram/bot"
@@ -27,6 +28,9 @@ var botCommands = []models.BotCommand{
 	{Command: "new", Description: "Start a new session"},
 	{Command: "sessions", Description: "List your sessions and pick one to switch to"},
 	{Command: "model", Description: "Choose a provider and model for the active session"},
+	{Command: "summarymodel", Description: "Choose the LLM used to summarize into global memory"},
+	{Command: "save", Description: "Save recent messages to global (long-term) memory now"},
+	{Command: "compact", Description: "Consolidate global memory when it grows large"},
 }
 
 // loadingFrames cycle in the placeholder message shown while a reply is
@@ -47,8 +51,26 @@ const (
 	historyLimitVar    = "SESSION_HISTORY_LIMIT"
 	dbPathVar          = "DB_PATH"
 
+	embeddingProviderVar = "EMBEDDING_PROVIDER"
+	embeddingModelVar    = "EMBEDDING_MODEL"
+	memThresholdVar      = "GLOBAL_MEMORY_MESSAGE_THRESHOLD"
+	memMinSimilarityVar  = "GLOBAL_MEMORY_MIN_SIMILARITY"
+	memTopKVar           = "GLOBAL_MEMORY_TOP_K"
+	memMaxRowsVar        = "GLOBAL_MEMORY_MAX_ROWS"
+
 	defaultHistoryLimit = 20
 	defaultDBPath       = "bot.db"
+
+	defaultEmbeddingProvider = llm.ProviderOllama
+	defaultEmbeddingModel    = "embeddinggemma"
+	defaultMemThreshold      = 20
+	defaultMemMinSimilarity  = 0.4
+	defaultMemTopK           = 25
+	defaultMemMaxRows        = 10000
+
+	// Summarization defaults to the same free local model as chat.
+	defaultSummarizationProvider = llm.ProviderOllama
+	defaultSummarizationModel    = "gemma4:latest"
 
 	// Ollama costs nothing to run locally, so it's the default for new
 	// sessions; /model lets a session switch to OpenAI (or another Ollama
@@ -93,14 +115,56 @@ func main() {
 	}
 	defer db.Close()
 
+	ollamaBaseURL := os.Getenv(ollamaBaseURLVar)
+	ollamaKeepAlive := getEnv(ollamaKeepAliveVar, defaultOllamaKeepAlive)
 	historyLimit := getEnvInt(historyLimitVar, defaultHistoryLimit)
+	memThreshold := getEnvInt(memThresholdVar, defaultMemThreshold)
+
+	// Notifier for the "global memory nearly full" warning. Its bot handle
+	// is filled in once the bot exists (below), before any worker starts.
+	notifier := &botNotifier{ctx: ctx}
+
+	mem, err := memory.New(memory.Config{
+		Store: db,
+		Embedding: llm.Config{
+			Name:      llm.ProviderName(getEnv(embeddingProviderVar, string(defaultEmbeddingProvider))),
+			Model:     getEnv(embeddingModelVar, defaultEmbeddingModel),
+			APIToken:  openaiApiToken,
+			BaseURL:   ollamaBaseURL,
+			KeepAlive: ollamaKeepAlive,
+		},
+		MessageThreshold:             memThreshold,
+		TopK:                         getEnvInt(memTopKVar, defaultMemTopK),
+		MinSimilarity:                float32(getEnvFloat(memMinSimilarityVar, defaultMemMinSimilarity)),
+		MaxRows:                      getEnvInt(memMaxRowsVar, defaultMemMaxRows),
+		DefaultSummarizationProvider: defaultSummarizationProvider,
+		DefaultSummarizationModel:    defaultSummarizationModel,
+		OpenAIAPIToken:               openaiApiToken,
+		OllamaBaseURL:                ollamaBaseURL,
+		OllamaKeepAlive:              ollamaKeepAlive,
+		Notifier:                     notifier,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Req #10: the DB is bound to one embedding model. A mismatch is fatal.
+	if err := mem.CheckEmbeddingModel(); err != nil {
+		log.Fatal(err)
+	}
+	// Reachability is only a warning: memory degrades to a no-op this run.
+	if err := mem.CheckAccessible(ctx); err != nil {
+		log.Printf("Warning: embedding model not reachable, global memory disabled this run: %v", err)
+	}
+
 	manager := session.NewManager(db, session.Config{
 		HistoryLimit:    historyLimit,
 		DefaultProvider: defaultProvider,
 		DefaultModel:    defaultModel,
 		OpenAIAPIToken:  openaiApiToken,
-		OllamaBaseURL:   os.Getenv(ollamaBaseURLVar),
-		OllamaKeepAlive: getEnv(ollamaKeepAliveVar, defaultOllamaKeepAlive),
+		OllamaBaseURL:   ollamaBaseURL,
+		OllamaKeepAlive: ollamaKeepAlive,
+		GlobalMemory:    mem,
 	})
 
 	allowList := auth.NewAllowList()
@@ -114,6 +178,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	notifier.bot = b
 
 	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: botCommands}); err != nil {
 		log.Printf("Warning: failed to register bot commands menu: %v", err)
@@ -121,12 +186,22 @@ func main() {
 
 	b.RegisterHandler(bot.HandlerTypeMessageText, "new", bot.MatchTypeCommand, newSessionHandler(manager))
 	b.RegisterHandler(bot.HandlerTypeMessageText, "sessions", bot.MatchTypeCommand, listSessionsHandler(manager))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "model", bot.MatchTypeCommand, modelPickerHandler())
-	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "provider:", bot.MatchTypePrefix, providerChosenHandler(manager))
-	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "model:", bot.MatchTypePrefix, modelChosenHandler(manager))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "model", bot.MatchTypeCommand, pickerStartHandler(modelPickerCfg))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "summarymodel", bot.MatchTypeCommand, pickerStartHandler(summaryPickerCfg))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "save", bot.MatchTypeCommand, saveHandler(manager))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "compact", bot.MatchTypeCommand, compactHandler(manager))
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "provider:", bot.MatchTypePrefix, pickerProviderHandler(manager, modelPickerCfg))
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "model:", bot.MatchTypePrefix, pickerModelHandler(manager, modelPickerCfg))
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "sumprovider:", bot.MatchTypePrefix, pickerProviderHandler(manager, summaryPickerCfg))
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "summodel:", bot.MatchTypePrefix, pickerModelHandler(manager, summaryPickerCfg))
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "switch:", bot.MatchTypePrefix, switchSessionChosenHandler(manager))
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "compact:", bot.MatchTypePrefix, compactChosenHandler(manager))
 
-	log.Printf("Bot is listening for requests (db: %s, session history limit: %d messages). Press Ctrl+C to stop.", dbPath, historyLimit)
+	// Start per-user summarization workers now that the notifier has its
+	// bot handle.
+	mem.Start(ctx, auth.AllowedUserIDs())
+
+	log.Printf("Bot is listening for requests (db: %s, session history limit: %d messages, global memory threshold: %d messages). Press Ctrl+C to stop.", dbPath, historyLimit, memThreshold)
 	b.Start(ctx)
 }
 
@@ -345,14 +420,41 @@ func switchSessionChosenHandler(manager *session.Manager) bot.HandlerFunc {
 	}
 }
 
-// modelPickerHandler starts the /model flow: show one button per supported
-// provider. Tapping one triggers providerChosenHandler.
-func modelPickerHandler() bot.HandlerFunc {
+// modelPicker parameterizes a provider→model inline-keyboard flow. /model
+// and /summarymodel share the same listing logic and differ only in their
+// callback-data prefixes and the action applied to the final choice.
+type modelPicker struct {
+	providerPrefix string // callback prefix for provider buttons
+	modelPrefix    string // callback prefix for model buttons
+	apply          func(m *session.Manager, userID int64, provider llm.ProviderName, model string) error
+	successFmt     string // e.g. "Active session now using %s/%s"
+}
+
+var modelPickerCfg = modelPicker{
+	providerPrefix: "provider:",
+	modelPrefix:    "model:",
+	apply: func(m *session.Manager, userID int64, p llm.ProviderName, model string) error {
+		return m.SetModel(userID, p, model)
+	},
+	successFmt: "Active session now using %s/%s",
+}
+
+var summaryPickerCfg = modelPicker{
+	providerPrefix: "sumprovider:",
+	modelPrefix:    "summodel:",
+	apply: func(m *session.Manager, userID int64, p llm.ProviderName, model string) error {
+		return m.SetSummarizationModel(userID, p, model)
+	},
+	successFmt: "Summarization now uses %s/%s",
+}
+
+// pickerStartHandler shows one button per supported provider.
+func pickerStartHandler(cfg modelPicker) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		rows := make([][]models.InlineKeyboardButton, 0, len(llm.Providers))
 		for _, p := range llm.Providers {
 			rows = append(rows, []models.InlineKeyboardButton{
-				{Text: string(p), CallbackData: "provider:" + string(p)},
+				{Text: string(p), CallbackData: cfg.providerPrefix + string(p)},
 			})
 		}
 		b.SendMessage(ctx, &bot.SendMessageParams{
@@ -363,15 +465,14 @@ func modelPickerHandler() bot.HandlerFunc {
 	}
 }
 
-// providerChosenHandler follows a provider tap: list its models (a static
+// pickerProviderHandler follows a provider tap: list its models (a static
 // whitelist for OpenAI, a live /api/tags query for Ollama) as buttons.
-// Tapping one triggers modelChosenHandler.
-func providerChosenHandler(manager *session.Manager) bot.HandlerFunc {
+func pickerProviderHandler(manager *session.Manager, cfg modelPicker) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		cq := update.CallbackQuery
 		answer(ctx, b, cq)
 
-		providerName := llm.ProviderName(strings.TrimPrefix(cq.Data, "provider:"))
+		providerName := llm.ProviderName(strings.TrimPrefix(cq.Data, cfg.providerPrefix))
 		modelNames, err := manager.ModelsFor(ctx, providerName)
 		if err != nil {
 			log.Println(err)
@@ -386,7 +487,7 @@ func providerChosenHandler(manager *session.Manager) bot.HandlerFunc {
 		rows := make([][]models.InlineKeyboardButton, 0, len(modelNames))
 		for _, m := range modelNames {
 			rows = append(rows, []models.InlineKeyboardButton{
-				{Text: m, CallbackData: "model:" + string(providerName) + ":" + m},
+				{Text: m, CallbackData: cfg.modelPrefix + string(providerName) + ":" + m},
 			})
 		}
 		keyboard := models.InlineKeyboardMarkup{InlineKeyboard: rows}
@@ -394,14 +495,13 @@ func providerChosenHandler(manager *session.Manager) bot.HandlerFunc {
 	}
 }
 
-// modelChosenHandler finishes the /model flow: apply the picked model to
-// the user's active session.
-func modelChosenHandler(manager *session.Manager) bot.HandlerFunc {
+// pickerModelHandler applies the picked model via the config's apply func.
+func pickerModelHandler(manager *session.Manager, cfg modelPicker) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		cq := update.CallbackQuery
 		answer(ctx, b, cq)
 
-		rest := strings.TrimPrefix(cq.Data, "model:")
+		rest := strings.TrimPrefix(cq.Data, cfg.modelPrefix)
 		providerRaw, modelName, ok := strings.Cut(rest, ":")
 		if !ok {
 			editMessage(ctx, b, cq, "Invalid selection.", nil)
@@ -409,12 +509,78 @@ func modelChosenHandler(manager *session.Manager) bot.HandlerFunc {
 		}
 		providerName := llm.ProviderName(providerRaw)
 
-		if err := manager.SetModel(cq.From.ID, providerName, modelName); err != nil {
+		if err := cfg.apply(manager, cq.From.ID, providerName, modelName); err != nil {
 			log.Println(err)
 			editMessage(ctx, b, cq, fmt.Sprintf("Error: %v", err), nil)
 			return
 		}
-		editMessage(ctx, b, cq, fmt.Sprintf("Active session now using %s/%s", providerName, modelName), nil)
+		editMessage(ctx, b, cq, fmt.Sprintf(cfg.successFmt, providerName, modelName), nil)
+	}
+}
+
+// saveHandler triggers a manual global-memory save of the active session's
+// unsaved messages.
+func saveHandler(manager *session.Manager) bot.HandlerFunc {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		if err := manager.SaveGlobalMemory(update.Message.From.ID); err != nil {
+			log.Println(err)
+			send(ctx, b, update, fmt.Sprintf("Error: %v", err))
+			return
+		}
+		send(ctx, b, update, "Saving recent messages to global memory in the background.")
+	}
+}
+
+// compactHandler starts the /compact flow: nothing to do below target,
+// otherwise a warn-then-confirm prompt.
+func compactHandler(manager *session.Manager) bot.HandlerFunc {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		rows, target, err := manager.CompactionStatus(update.Message.From.ID)
+		if err != nil {
+			log.Println(err)
+			send(ctx, b, update, fmt.Sprintf("Error: %v", err))
+			return
+		}
+		if rows <= target {
+			send(ctx, b, update, fmt.Sprintf("Nothing to compact (%d rows, target ~%d).", rows, target))
+			return
+		}
+		keyboard := models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
+			{Text: "Confirm", CallbackData: "compact:confirm"},
+			{Text: "Cancel", CallbackData: "compact:cancel"},
+		}}}
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text: fmt.Sprintf(
+				"This will consolidate your global memory from %d rows down to ~%d and may take a while. "+
+					"You won't be able to chat until it finishes. Proceed?", rows, target),
+			ReplyMarkup: keyboard,
+		})
+	}
+}
+
+// compactChosenHandler handles the Confirm/Cancel taps of /compact. Confirm
+// blocks on the (synchronous) compaction and reports the result.
+func compactChosenHandler(manager *session.Manager) bot.HandlerFunc {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		cq := update.CallbackQuery
+		answer(ctx, b, cq)
+
+		switch strings.TrimPrefix(cq.Data, "compact:") {
+		case "cancel":
+			editMessage(ctx, b, cq, "Cancelled.", nil)
+		case "confirm":
+			editMessage(ctx, b, cq, "Compacting… please wait.", nil)
+			before, after, err := manager.StartCompaction(ctx, cq.From.ID)
+			if err != nil {
+				log.Println(err)
+				editMessage(ctx, b, cq, fmt.Sprintf("Error: %v", err), nil)
+				return
+			}
+			editMessage(ctx, b, cq, fmt.Sprintf("Compacted %d rows into %d.", before, after), nil)
+		default:
+			editMessage(ctx, b, cq, "Invalid selection.", nil)
+		}
 	}
 }
 
@@ -480,4 +646,32 @@ func getEnvInt(name string, fallback int) int {
 		log.Fatalf("Invalid int value for env var %v: %v", name, v)
 	}
 	return n
+}
+
+func getEnvFloat(name string, fallback float64) float64 {
+	v, ok := os.LookupEnv(name)
+	if !ok {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		log.Fatalf("Invalid float value for env var %v: %v", name, v)
+	}
+	return f
+}
+
+// botNotifier delivers global-memory warnings to a user's private chat. A
+// private chat's ID equals the user's ID, matching how the rest of the bot
+// treats chat-id and user-id interchangeably. Its bot handle is set after
+// the bot is constructed, before any worker starts.
+type botNotifier struct {
+	ctx context.Context
+	bot *bot.Bot
+}
+
+func (n *botNotifier) Notify(userID int64, message string) {
+	if n.bot == nil {
+		return
+	}
+	n.bot.SendMessage(n.ctx, &bot.SendMessageParams{ChatID: userID, Text: message})
 }

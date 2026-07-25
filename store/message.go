@@ -51,3 +51,29 @@ func (s *Store) GetHistory(sessionID int64, limit int) ([]Message, error) {
 	}
 	return messages, nil
 }
+
+// GetMessagesSince returns all messages of the session with id greater than
+// afterMessageID, in chronological order. Unlike GetHistory this is
+// unbounded -- it's what the summarizer reads to process everything that
+// has accumulated since the last checkpoint.
+func (s *Store) GetMessagesSince(sessionID, afterMessageID int64) ([]Message, error) {
+	rows, err := s.db.Query(
+		`SELECT id, session_id, role, content, created_at FROM messages
+		 WHERE session_id = ? AND id > ? ORDER BY id ASC`,
+		sessionID, afterMessageID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		messages = append(messages, m)
+	}
+	return messages, rows.Err()
+}

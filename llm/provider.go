@@ -31,6 +31,13 @@ type Provider interface {
 	GenerateStream(ctx context.Context, messages []Message, onChunk func(chunk string)) (string, error)
 }
 
+// Embedder turns texts into embedding vectors. Both providers implement it
+// via the same client used for chat, just configured with an embedding
+// model rather than a chat model.
+type Embedder interface {
+	Embed(ctx context.Context, texts []string) ([][]float32, error)
+}
+
 // ProviderName identifies a supported LLM backend.
 type ProviderName string
 
@@ -82,5 +89,19 @@ func New(cfg Config) (Provider, error) {
 		return newOllama(cfg.Model, cfg.BaseURL, cfg.KeepAlive)
 	default:
 		return nil, fmt.Errorf("unknown LLM provider: %v", cfg.Name)
+	}
+}
+
+// NewEmbedder builds an Embedder from the same Config shape as New. The
+// returned value is a distinct instance configured with cfg.Model as the
+// embedding model.
+func NewEmbedder(cfg Config) (Embedder, error) {
+	switch cfg.Name {
+	case ProviderOpenAI:
+		return newOpenAI(cfg.Model, cfg.APIToken)
+	case ProviderOllama:
+		return newOllama(cfg.Model, cfg.BaseURL, cfg.KeepAlive)
+	default:
+		return nil, fmt.Errorf("unknown embedding provider: %v", cfg.Name)
 	}
 }

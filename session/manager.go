@@ -3,11 +3,25 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/RinSer/tg-llm-memory-bot/llm"
+	"github.com/RinSer/tg-llm-memory-bot/memory"
 	"github.com/RinSer/tg-llm-memory-bot/store"
 )
+
+// GlobalMemory is the slice of the memory.Manager that session.Manager
+// depends on. Kept as an interface so tests can substitute a fake without
+// standing up the real embedding/summarization pipeline.
+type GlobalMemory interface {
+	RelevantFacts(ctx context.Context, userID int64, queryText string) ([]string, error)
+	Signal(userID, sessionID int64, kind memory.SignalKind)
+	SetSummarizationModel(userID int64, provider llm.ProviderName, model string) error
+	IsCompacting(userID int64) bool
+	CompactionStatus(userID int64) (rows, target int, err error)
+	StartCompaction(ctx context.Context, userID int64) (before, after int, err error)
+}
 
 // Config holds everything the Manager needs that isn't per-session state:
 // provider credentials/endpoints and defaults for newly created sessions.
@@ -18,6 +32,7 @@ type Config struct {
 	OpenAIAPIToken  string
 	OllamaBaseURL   string
 	OllamaKeepAlive string
+	GlobalMemory    GlobalMemory
 }
 
 type Manager struct {
@@ -28,6 +43,10 @@ type Manager struct {
 func NewManager(s *store.Store, cfg Config) *Manager {
 	return &Manager{store: s, cfg: cfg}
 }
+
+// compactionInProgressMsg is returned to the user if they try to chat while
+// their global memory is being compacted.
+const compactionInProgressMsg = "Global memory compaction is in progress. Please try again in a moment."
 
 const titleTimeFormat = "2006-01-02 15:04:05"
 
@@ -69,6 +88,12 @@ func (m *Manager) ReplyStream(ctx context.Context, userID int64, text string, on
 }
 
 func (m *Manager) reply(ctx context.Context, userID int64, text string, onChunk func(chunk string)) (string, error) {
+	// Block chatting for a user whose global memory is being compacted --
+	// before any history/provider/DB side effects.
+	if m.cfg.GlobalMemory != nil && m.cfg.GlobalMemory.IsCompacting(userID) {
+		return compactionInProgressMsg, nil
+	}
+
 	sess, err := m.activeSession(userID)
 	if err != nil {
 		return "", err
@@ -83,7 +108,21 @@ func (m *Manager) reply(ctx context.Context, userID int64, text string, onChunk 
 		return "", err
 	}
 
-	messages := make([]llm.Message, 0, len(history)+1)
+	messages := make([]llm.Message, 0, len(history)+2)
+	// Prepend relevant long-term facts as a system message, if any.
+	if m.cfg.GlobalMemory != nil {
+		facts, ferr := m.cfg.GlobalMemory.RelevantFacts(ctx, userID, text)
+		if ferr != nil {
+			// Retrieval is best-effort: log-worthy but never fatal to a chat.
+			facts = nil
+		}
+		if len(facts) > 0 {
+			messages = append(messages, llm.Message{
+				Role:    llm.RoleSystem,
+				Content: "Known facts from the user:\n" + strings.Join(facts, "\n"),
+			})
+		}
+	}
 	for _, h := range history {
 		messages = append(messages, llm.Message{Role: llm.Role(h.Role), Content: h.Content})
 	}
@@ -108,15 +147,22 @@ func (m *Manager) reply(ctx context.Context, userID int64, text string, onChunk 
 		return "", err
 	}
 
+	// Wake the summarization worker; the threshold gate lives in the worker.
+	if m.cfg.GlobalMemory != nil {
+		m.cfg.GlobalMemory.Signal(userID, sess.ID, memory.SignalMessageThreshold)
+	}
+
 	return reply, nil
 }
 
 // NewSession creates a session with the given title, or a timestamp-based
-// one if title is empty.
+// one if title is empty. Creating a session deactivates whatever was
+// active, so its unsaved tail is flushed to global memory first.
 func (m *Manager) NewSession(userID int64, title string) (*store.Session, error) {
 	if title == "" {
 		title = DefaultTitle()
 	}
+	m.signalDeactivated(userID)
 	return m.store.CreateSession(userID, title, string(m.cfg.DefaultProvider), m.cfg.DefaultModel)
 }
 
@@ -124,8 +170,61 @@ func (m *Manager) ListSessions(userID int64) ([]store.Session, error) {
 	return m.store.ListSessions(userID)
 }
 
+// SwitchSession activates a different session; the one being switched away
+// from has its unsaved tail flushed to global memory.
 func (m *Manager) SwitchSession(userID, sessionID int64) error {
+	m.signalDeactivated(userID)
 	return m.store.SetActiveSession(userID, sessionID)
+}
+
+// signalDeactivated flushes the currently-active session (if any) to global
+// memory before it's deactivated by a new/switch operation.
+func (m *Manager) signalDeactivated(userID int64) {
+	if m.cfg.GlobalMemory == nil {
+		return
+	}
+	if sess, err := m.store.GetActiveSession(userID); err == nil {
+		m.cfg.GlobalMemory.Signal(userID, sess.ID, memory.SignalSessionSwitch)
+	}
+}
+
+// SaveGlobalMemory manually triggers summarization of the user's active
+// session's unsaved messages (the /save command).
+func (m *Manager) SaveGlobalMemory(userID int64) error {
+	if m.cfg.GlobalMemory == nil {
+		return nil
+	}
+	sess, err := m.activeSession(userID)
+	if err != nil {
+		return err
+	}
+	m.cfg.GlobalMemory.Signal(userID, sess.ID, memory.SignalManual)
+	return nil
+}
+
+// SetSummarizationModel sets the user's summarization LLM (the
+// /summarymodel command).
+func (m *Manager) SetSummarizationModel(userID int64, provider llm.ProviderName, model string) error {
+	if m.cfg.GlobalMemory == nil {
+		return nil
+	}
+	return m.cfg.GlobalMemory.SetSummarizationModel(userID, provider, model)
+}
+
+// CompactionStatus reports the user's current fact-row count and target.
+func (m *Manager) CompactionStatus(userID int64) (rows, target int, err error) {
+	if m.cfg.GlobalMemory == nil {
+		return 0, 0, nil
+	}
+	return m.cfg.GlobalMemory.CompactionStatus(userID)
+}
+
+// StartCompaction runs (and blocks on) compaction for the user.
+func (m *Manager) StartCompaction(ctx context.Context, userID int64) (before, after int, err error) {
+	if m.cfg.GlobalMemory == nil {
+		return 0, 0, nil
+	}
+	return m.cfg.GlobalMemory.StartCompaction(ctx, userID)
 }
 
 // ModelsFor returns the selectable models for a provider -- a hardcoded

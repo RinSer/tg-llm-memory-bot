@@ -80,3 +80,7 @@ func (o *localOllama) Generate(ctx context.Context, messages []Message) (string,
 func (o *localOllama) GenerateStream(ctx context.Context, messages []Message, onChunk func(string)) (string, error) {
 	return generateStream(ctx, o.model, messages, onChunk)
 }
+
+func (o *localOllama) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	return o.model.CreateEmbedding(ctx, texts)
+}

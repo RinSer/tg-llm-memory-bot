@@ -33,6 +33,11 @@ type Config struct {
 	OllamaBaseURL   string
 	OllamaKeepAlive string
 	GlobalMemory    GlobalMemory
+
+	// EmbeddingModel is the model reserved for global-memory embeddings. It
+	// is filtered out of the chat/summarization model pickers, since it's
+	// not a chat model and picking it would break those flows.
+	EmbeddingModel string
 }
 
 type Manager struct {
@@ -238,10 +243,40 @@ func (m *Manager) StartCompaction(ctx context.Context, userID int64) (before, af
 	return m.cfg.GlobalMemory.StartCompaction(ctx, userID)
 }
 
-// ModelsFor returns the selectable models for a provider -- a hardcoded
-// whitelist for OpenAI, queried live from the server for Ollama.
+// ModelsFor returns the selectable chat models for a provider -- a
+// hardcoded whitelist for OpenAI, queried live from the server for Ollama.
+// The configured embedding model is filtered out: it's not a chat model, so
+// it must not appear in the /model or /summarymodel pickers.
 func (m *Manager) ModelsFor(ctx context.Context, providerName llm.ProviderName) ([]string, error) {
-	return llm.ModelsFor(ctx, providerName, m.cfg.OllamaBaseURL)
+	all, err := llm.ModelsFor(ctx, providerName, m.cfg.OllamaBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if m.cfg.EmbeddingModel == "" {
+		return all, nil
+	}
+	out := make([]string, 0, len(all))
+	for _, name := range all {
+		if sameOllamaModel(name, m.cfg.EmbeddingModel) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
+}
+
+// sameOllamaModel reports whether two Ollama model references name the same
+// model, accounting for the implicit ":latest" tag (so "embeddinggemma" and
+// "embeddinggemma:latest" compare equal).
+func sameOllamaModel(a, b string) bool {
+	return withImplicitTag(a) == withImplicitTag(b)
+}
+
+func withImplicitTag(name string) string {
+	if strings.Contains(name, ":") {
+		return name
+	}
+	return name + ":latest"
 }
 
 // SetModel switches the provider/model of the user's active session.

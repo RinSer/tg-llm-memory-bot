@@ -130,6 +130,7 @@ func main() {
 	ollamaKeepAlive := getEnv(ollamaKeepAliveVar, defaultOllamaKeepAlive)
 	historyLimit := getEnvInt(historyLimitVar, defaultHistoryLimit)
 	memThreshold := getEnvInt(memThresholdVar, defaultMemThreshold)
+	embeddingModel := getEnv(embeddingModelVar, defaultEmbeddingModel)
 
 	// Notifier for the "global memory nearly full" warning. Its bot handle
 	// is filled in once the bot exists (below), before any worker starts.
@@ -139,7 +140,7 @@ func main() {
 		Store: db,
 		Embedding: llm.Config{
 			Name:      llm.ProviderName(getEnv(embeddingProviderVar, string(defaultEmbeddingProvider))),
-			Model:     getEnv(embeddingModelVar, defaultEmbeddingModel),
+			Model:     embeddingModel,
 			APIToken:  openaiApiToken,
 			BaseURL:   ollamaBaseURL,
 			KeepAlive: ollamaKeepAlive,
@@ -176,6 +177,7 @@ func main() {
 		OllamaBaseURL:   ollamaBaseURL,
 		OllamaKeepAlive: ollamaKeepAlive,
 		GlobalMemory:    mem,
+		EmbeddingModel:  embeddingModel,
 	})
 
 	allowList := auth.NewAllowList()

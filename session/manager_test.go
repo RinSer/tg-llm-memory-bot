@@ -402,3 +402,30 @@ func TestModelsForOllamaUsesConfiguredServer(t *testing.T) {
 		t.Fatalf("expected [llama3.2:latest, gemma4:latest], got %v", got)
 	}
 }
+
+func TestModelsForFiltersOutEmbeddingModel(t *testing.T) {
+	fake := newFakeOllama(t)
+	fake.tags = []string{"embeddinggemma:latest", "gemma4:latest", "llama3.2:latest"}
+	db := openTestStore(t)
+	// EmbeddingModel is configured without a tag; the server lists it with
+	// the implicit ":latest" -- the filter must still match and drop it.
+	mgr := NewManager(db, Config{
+		DefaultProvider: llm.ProviderOllama,
+		DefaultModel:    "gemma4:latest",
+		OllamaBaseURL:   fake.URL,
+		EmbeddingModel:  "embeddinggemma",
+	})
+
+	got, err := mgr.ModelsFor(context.Background(), llm.ProviderOllama)
+	if err != nil {
+		t.Fatalf("ModelsFor: %v", err)
+	}
+	for _, m := range got {
+		if m == "embeddinggemma:latest" {
+			t.Fatalf("embedding model should be filtered out, got %v", got)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 chat models after filtering, got %v", got)
+	}
+}

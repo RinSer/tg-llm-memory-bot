@@ -1,0 +1,53 @@
+name: Release
+
+# Build cross-platform binaries and attach them to a GitHub Release
+# whenever a version tag (e.g. v1.0.0) is pushed.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # required to create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Don't ship a broken binary: the whole suite must pass first. All
+      # tests are self-contained (in-memory SQLite, httptest fakes) with no
+      # external services, so they run cleanly on CI.
+      - name: Test
+        run: go test ./...
+
+      # The SQLite driver is pure Go, so CGO_ENABLED=0 lets one Linux runner
+      # cross-compile every target. banner.txt is embedded via //go:embed, so
+      # each binary is fully self-contained.
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          bin=tg-llm-memory-bot
+          # "GOOS GOARCH extension"
+          for target in "windows amd64 .exe" "darwin arm64 " "darwin amd64 "; do
+            set -- $target
+            goos=$1; goarch=$2; ext=$3
+            out="dist/${bin}_${goos}_${goarch}${ext}"
+            echo "Building $out"
+            GOOS=$goos GOARCH=$goarch go build -trimpath -ldflags "-s -w" -o "$out" .
+          done
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          ls -la dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

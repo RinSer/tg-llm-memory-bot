@@ -34,10 +34,13 @@ type Config struct {
 	OllamaKeepAlive string
 	GlobalMemory    GlobalMemory
 
-	// EmbeddingModel is the model reserved for global-memory embeddings. It
-	// is filtered out of the chat/summarization model pickers, since it's
-	// not a chat model and picking it would break those flows.
-	EmbeddingModel string
+	// EmbeddingProvider/EmbeddingModel identify the model reserved for
+	// global-memory embeddings. It is filtered out of the chat/summarization
+	// model pickers (but only when browsing its own provider, since it can't
+	// appear in another provider's list), as it's not a chat model and
+	// picking it would break those flows.
+	EmbeddingProvider llm.ProviderName
+	EmbeddingModel    string
 }
 
 type Manager struct {
@@ -245,19 +248,21 @@ func (m *Manager) StartCompaction(ctx context.Context, userID int64) (before, af
 
 // ModelsFor returns the selectable chat models for a provider -- a
 // hardcoded whitelist for OpenAI, queried live from the server for Ollama.
-// The configured embedding model is filtered out: it's not a chat model, so
-// it must not appear in the /model or /summarymodel pickers.
+// The configured embedding model is filtered out (it's not a chat model, so
+// it must not appear in the /model or /summarymodel pickers) -- but only
+// when browsing the embedding model's own provider, since it can't appear
+// in a different provider's list anyway.
 func (m *Manager) ModelsFor(ctx context.Context, providerName llm.ProviderName) ([]string, error) {
 	all, err := llm.ModelsFor(ctx, providerName, m.cfg.OllamaBaseURL)
 	if err != nil {
 		return nil, err
 	}
-	if m.cfg.EmbeddingModel == "" {
+	if m.cfg.EmbeddingModel == "" || providerName != m.cfg.EmbeddingProvider {
 		return all, nil
 	}
 	out := make([]string, 0, len(all))
 	for _, name := range all {
-		if sameOllamaModel(name, m.cfg.EmbeddingModel) {
+		if sameModel(name, m.cfg.EmbeddingModel) {
 			continue
 		}
 		out = append(out, name)
@@ -265,10 +270,11 @@ func (m *Manager) ModelsFor(ctx context.Context, providerName llm.ProviderName) 
 	return out, nil
 }
 
-// sameOllamaModel reports whether two Ollama model references name the same
-// model, accounting for the implicit ":latest" tag (so "embeddinggemma" and
-// "embeddinggemma:latest" compare equal).
-func sameOllamaModel(a, b string) bool {
+// sameModel reports whether two model references name the same model,
+// accounting for Ollama's implicit ":latest" tag (so "embeddinggemma" and
+// "embeddinggemma:latest" compare equal). For tagless providers like OpenAI
+// the ":latest" is appended to both sides, so it reduces to exact equality.
+func sameModel(a, b string) bool {
 	return withImplicitTag(a) == withImplicitTag(b)
 }
 

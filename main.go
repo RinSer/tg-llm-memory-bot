@@ -130,6 +130,7 @@ func main() {
 	ollamaKeepAlive := getEnv(ollamaKeepAliveVar, defaultOllamaKeepAlive)
 	historyLimit := getEnvInt(historyLimitVar, defaultHistoryLimit)
 	memThreshold := getEnvInt(memThresholdVar, defaultMemThreshold)
+	embeddingProvider := llm.ProviderName(getEnv(embeddingProviderVar, string(defaultEmbeddingProvider)))
 	embeddingModel := getEnv(embeddingModelVar, defaultEmbeddingModel)
 
 	// Notifier for the "global memory nearly full" warning. Its bot handle
@@ -139,7 +140,7 @@ func main() {
 	mem, err := memory.New(memory.Config{
 		Store: db,
 		Embedding: llm.Config{
-			Name:      llm.ProviderName(getEnv(embeddingProviderVar, string(defaultEmbeddingProvider))),
+			Name:      embeddingProvider,
 			Model:     embeddingModel,
 			APIToken:  openaiApiToken,
 			BaseURL:   ollamaBaseURL,
@@ -170,14 +171,15 @@ func main() {
 	}
 
 	manager := session.NewManager(db, session.Config{
-		HistoryLimit:    historyLimit,
-		DefaultProvider: defaultProvider,
-		DefaultModel:    defaultModel,
-		OpenAIAPIToken:  openaiApiToken,
-		OllamaBaseURL:   ollamaBaseURL,
-		OllamaKeepAlive: ollamaKeepAlive,
-		GlobalMemory:    mem,
-		EmbeddingModel:  embeddingModel,
+		HistoryLimit:      historyLimit,
+		DefaultProvider:   defaultProvider,
+		DefaultModel:      defaultModel,
+		OpenAIAPIToken:    openaiApiToken,
+		OllamaBaseURL:     ollamaBaseURL,
+		OllamaKeepAlive:   ollamaKeepAlive,
+		GlobalMemory:      mem,
+		EmbeddingProvider: embeddingProvider,
+		EmbeddingModel:    embeddingModel,
 	})
 
 	allowList := auth.NewAllowList()

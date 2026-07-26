@@ -410,10 +410,11 @@ func TestModelsForFiltersOutEmbeddingModel(t *testing.T) {
 	// EmbeddingModel is configured without a tag; the server lists it with
 	// the implicit ":latest" -- the filter must still match and drop it.
 	mgr := NewManager(db, Config{
-		DefaultProvider: llm.ProviderOllama,
-		DefaultModel:    "gemma4:latest",
-		OllamaBaseURL:   fake.URL,
-		EmbeddingModel:  "embeddinggemma",
+		DefaultProvider:   llm.ProviderOllama,
+		DefaultModel:      "gemma4:latest",
+		OllamaBaseURL:     fake.URL,
+		EmbeddingProvider: llm.ProviderOllama,
+		EmbeddingModel:    "embeddinggemma",
 	})
 
 	got, err := mgr.ModelsFor(context.Background(), llm.ProviderOllama)
@@ -427,5 +428,29 @@ func TestModelsForFiltersOutEmbeddingModel(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 chat models after filtering, got %v", got)
+	}
+}
+
+func TestModelsForFilterScopedToEmbeddingProvider(t *testing.T) {
+	fake := newFakeOllama(t)
+	fake.tags = []string{"gemma4:latest", "llama3.2:latest"}
+	db := openTestStore(t)
+	// Embedding provider is OpenAI, so the filter must NOT touch the Ollama
+	// list -- even though the (contrived) embedding model name collides with
+	// an Ollama model here.
+	mgr := NewManager(db, Config{
+		DefaultProvider:   llm.ProviderOllama,
+		DefaultModel:      "gemma4:latest",
+		OllamaBaseURL:     fake.URL,
+		EmbeddingProvider: llm.ProviderOpenAI,
+		EmbeddingModel:    "gemma4",
+	})
+
+	got, err := mgr.ModelsFor(context.Background(), llm.ProviderOllama)
+	if err != nil {
+		t.Fatalf("ModelsFor: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected no filtering across providers (2 models), got %v", got)
 	}
 }

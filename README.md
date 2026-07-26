@@ -65,6 +65,17 @@ Each produces a single self-contained binary for that platform — copy it over 
 
 Note: `go build ./...` (used for verifying the whole module compiles, e.g. in CI) matches multiple packages and therefore discards its output rather than writing a binary — use `go build .` (targeting just the root `main` package) as shown above to actually get an executable.
 
+### Automated releases
+
+Pushing a version tag builds the binaries and publishes them as a GitHub Release automatically, via [.github/workflows/release.yml](.github/workflows/release.yml):
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow runs the test suite, cross-compiles for Windows (amd64) and macOS (Apple Silicon + Intel) on a single Linux runner (possible because the build is pure-Go, `CGO_ENABLED=0`), and attaches the binaries plus a `SHA256SUMS.txt` to the release. To add more targets (e.g. Linux), extend the `for target in ...` list in the workflow.
+
 ## Stack
 
 - **Go**, [go-telegram/bot](https://github.com/go-telegram/bot) for the Telegram Bot API.
